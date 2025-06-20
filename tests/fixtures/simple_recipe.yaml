@@ -1,0 +1,24 @@
+# Simple test recipe for basic functionality
+models:
+  test_model: &test_model
+    provider: openai
+    model: gpt-4o-mini
+
+recipe:
+  name: Simple Test Recipe
+  user_inputs:
+    - id: topic
+      label: "Topic"
+      type: string
+      default: "Test Topic"
+  
+  nodes:
+    - id: generate_content
+      type: language_task
+      model: *test_model
+      prompt: "Write about {{topic}}"
+      # Input auto-mapped: topic from user_inputs
+      # Output defaults to: generate_content
+      
+  final_outputs:
+    - generate_content

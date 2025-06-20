@@ -1,0 +1,596 @@
+import asyncio
+import os
+import re
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List
+
+import requests
+from content_core import extract_content
+from loguru import logger
+from moviepy import (  # type: ignore
+    AudioFileClip,
+    concatenate_audioclips,
+)
+
+# Type alias for our custom functions
+# They will receive a dictionary of resolved inputs and should return a dictionary (JSON-serializable)
+# Making them potentially async as well for flexibility
+CustomTaskFunction = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
+
+
+async def research_news_stub(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    A stub function that simulates researching news for a given topic.
+    It expects 'topic' in the input dictionary.
+    """
+    topic = inputs.get("topic")
+    logger.info(f"[Custom Task] research_news_stub called with topic: {topic}")
+    if not topic:
+        return {"error": "Topic not provided for research_news_stub"}
+
+    # Simulate fetching news
+    return {
+        "summary": f"Research summary for '{topic}': AI continues to evolve rapidly, impacting various sectors. Recent developments include new large language models and ethical discussions.",
+        "articles": [
+            {
+                "title": f"AI Breakthroughs in {topic} Announced",
+                "source": "Tech News Today",
+                "url": f"http://example.com/news/{topic.lower().replace(' ', '-')}-breakthroughs",
+            },
+            {
+                "title": f"The Ethical Implications of AI in {topic}",
+                "source": "Ethics in Technology Quarterly",
+                "url": f"http://example.com/news/{topic.lower().replace(' ', '-')}-ethics",
+            },
+        ],
+        "related_keywords": [
+            "machine learning",
+            "deep learning",
+            "neural networks",
+            topic.lower(),
+        ],
+    }
+
+
+async def perplexity_search_task(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Performs a web search using Perplexity's API based on inputs.
+    Expected inputs: 'search_query' (str), 'recency' (str, optional), 'mode' (str, optional).
+    """
+    search_query = inputs.get("search_query")
+    recency = inputs.get("recency")  # Optional
+    mode = inputs.get("mode")  # Optional, defaults to 'fast' in underlying logic
+
+    logger.info(
+        f"[Custom Task] perplexity_search_task called with query: '{search_query}', recency: '{recency}', mode: '{mode}'"
+    )
+
+    if not search_query:
+        return {"error": "'search_query' not provided for perplexity_search_task"}
+
+    api_key = os.environ.get("PERPLEXITY_API_KEY")
+    if not api_key:
+        logger.error("PERPLEXITY_API_KEY not found in environment variables.")
+        return {"error": "PERPLEXITY_API_KEY not set."}
+
+    url = "https://api.perplexity.ai/chat/completions"
+    pplx_model = "sonar-reasoning-pro" if mode == "expert" else "sonar-pro"
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful AI assistant.",  # Simplified system prompt for now, can be expanded
+        },
+        {
+            "role": "user",
+            "content": search_query,
+        },
+    ]
+    payload = {
+        "model": pplx_model,
+        "messages": messages,
+        "max_tokens": 3500,  # Made integer
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "return_citations": True,
+        "return_images": False,
+        "return_related_questions": False,
+    }
+    if recency:
+        payload["search_recency_filter"] = recency
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        # Run the synchronous requests call in a separate thread
+        response = await asyncio.to_thread(
+            requests.post, url, json=payload, headers=headers
+        )
+        response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+
+        response_json = response.json()
+        content = (
+            response_json.get("choices", [{}])[0].get("message", {}).get("content")
+        )
+
+        if content is None:
+            logger.error(
+                f"Perplexity API response did not contain expected content structure. Response: {response_json}"
+            )
+            return {
+                "error": "Perplexity API query failed to return content.",
+                "details": response_json,
+            }
+
+        logger.info(f"Perplexity search successful for query: '{search_query}'")
+        return {"content": content, "citations": response_json.get("citations", [])}
+
+    except requests.exceptions.HTTPError as http_err:
+        logger.error(
+            f"HTTP error occurred during Perplexity API call: {http_err} - Response: {http_err.response.text}"
+        )
+        return {
+            "error": f"Perplexity API HTTP error: {http_err.response.status_code}",
+            "details": http_err.response.text,
+        }
+    except requests.exceptions.RequestException as req_err:
+        logger.error(f"Request error occurred during Perplexity API call: {req_err}")
+        return {"error": f"Perplexity API request error: {req_err}"}
+    except Exception as e:
+        logger.exception(f"An unexpected error occurred in perplexity_search_task: {e}")
+        return {"error": f"Unexpected error in perplexity_search_task: {str(e)}"}
+
+
+async def split_transcript(inputs: Dict[str, Any]) -> Dict[str, List[Dict[str, str]]]:
+    """
+    Parses a transcript string, grouping consecutive lines from the same speaker into turns.
+    Expects 'transcript', 'voice_mapping' (dict), and 'default_voice_id' in the input dictionary.
+    Output: {"phrases": [{"text": "...", "speaker": "...", "voice_id": "..."}, ...]}
+    """
+    transcript_content = inputs.get("transcript", "")
+    # voice_mapping is expected to be a dict, already resolved by _resolve_input_value in the workflow
+    voice_mapping = inputs.get("voice_mapping", {})
+    default_voice_id = inputs.get("default_voice_id", "unknown_voice")
+
+    if not isinstance(voice_mapping, dict):
+        logger.warning(f"split_transcript: voice_mapping was not a dict (type: {type(voice_mapping)}). Value: {voice_mapping}. Using empty mapping.")
+        voice_mapping = {}
+
+    logger.info(f"[Custom Task] split_transcript called. Voice Mapping: {voice_mapping}, Default Voice ID: {default_voice_id}")
+
+    if not transcript_content:
+        logger.warning("split_transcript: Empty transcript provided.")
+        return {"phrases": []}
+
+    phrases = []
+    current_speaker = None
+    current_text_parts = []
+
+    for line in transcript_content.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Attempt to identify speaker and text (e.g., "Speaker A: Some text")
+        # This regex assumes speaker names don't contain colons followed by a space.
+        match = re.match(r"^([^:]+?):\s*(.*)$", line)
+        
+        if match:
+            speaker, text_part = match.groups()
+            speaker = speaker.strip()
+            text_part = text_part.strip()
+
+            if current_speaker is None: # First speaker encountered
+                current_speaker = speaker
+                current_text_parts.append(text_part)
+            elif speaker == current_speaker: # Same speaker continues their turn
+                current_text_parts.append(text_part)
+            else: # Speaker has changed, new turn begins
+                if current_speaker and current_text_parts: # Save previous speaker's collected turn
+                    current_speaker_voice_id = voice_mapping.get(current_speaker, default_voice_id)
+                    phrases.append({"text": " ".join(current_text_parts), "speaker": current_speaker, "voice_id": current_speaker_voice_id})
+                current_speaker = speaker
+                current_text_parts = [text_part] # Start new turn's text
+        elif current_speaker and line: # Line doesn't have 'Speaker:', assume it's a continuation of the current speaker's text
+            current_text_parts.append(line)
+        elif not current_speaker and line: # Line before any speaker tag is found, treat as unknown
+            logger.debug(f"split_transcript: Line '{line}' found before any speaker tag. Attributing to 'Unknown Speaker' for now.")
+            current_speaker = "Unknown Speaker"
+            current_text_parts.append(line)
+            
+    # Add the last collected turn after loop finishes
+    if current_speaker and current_text_parts:
+        current_speaker_voice_id = voice_mapping.get(current_speaker, default_voice_id)
+        phrases.append({"text": " ".join(current_text_parts), "speaker": current_speaker, "voice_id": current_speaker_voice_id})
+    
+    if not phrases and transcript_content:
+        # Fallback if no speaker tags were found at all, but content exists
+        logger.warning("split_transcript: No speaker tags found in non-empty transcript. Treating entire transcript as a single phrase from 'Unknown Speaker'.")
+        # For this case, "Unknown Speaker" will also use the default_voice_id or a mapping if provided for "Unknown Speaker"
+        unknown_speaker_voice_id = voice_mapping.get("Unknown Speaker", default_voice_id)
+        phrases.append({"text": transcript_content, "speaker": "Unknown Speaker", "voice_id": unknown_speaker_voice_id})
+
+    logger.info(f"split_transcript: Successfully split transcript into {len(phrases)} phrases.")
+    return {"phrases": phrases}
+
+
+async def combine_audio_files(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Combines multiple audio files into a single MP3 file using moviepy.
+    Expects 'audio_segments_data' in inputs: a list of strings, where each string is a path to an audio file.
+    Also expects 'final_filename' in inputs: a string for the desired output filename (e.g., "podcast_episode.mp3").
+    Example input: {
+        "audio_segments_data": ["path/to/audio1.mp3", "path/to/audio2.mp3"],
+        "final_filename": "my_podcast.mp3"
+    }
+    Output: {"combined_audio_path": "output/audio/my_podcast.mp3"}
+    """
+    logger.info("[Custom Task] combine_audio_files called.")
+    list_of_audio_paths = inputs.get("audio_segments_data", [])
+    output_filename_from_input = inputs.get("final_filename")
+
+    if not list_of_audio_paths:
+        logger.warning("combine_audio_files: No audio segment data (list of paths) provided.")
+        return {"combined_audio_path": "ERROR: No audio segment data"}
+
+    if not isinstance(list_of_audio_paths, list):
+        logger.error(f"combine_audio_files: 'audio_segments_data' is not a list. Received: {type(list_of_audio_paths)}")
+        return {"combined_audio_path": "ERROR: audio_segments_data must be a list of file paths"}
+
+    clips = []
+    valid_clips = []
+    for i, file_path_str in enumerate(list_of_audio_paths):
+        if not isinstance(file_path_str, str):
+            logger.warning(f"combine_audio_files: Item {i} in audio_segments_data is not a string path: {file_path_str}. Skipping.")
+            continue
+
+        try:
+            p = Path(file_path_str)
+            if p.exists() and p.is_file():
+                clips.append(AudioFileClip(str(p)))
+                valid_clips.append(clips[-1]) # Keep track of valid clips for later
+                logger.debug(f"Added clip: {file_path_str}")
+            else:
+                logger.error(f"combine_audio_files: File not found or not a file: {file_path_str}")
+        except Exception as e:
+            logger.error(f"combine_audio_files: Error loading audio clip {file_path_str}: {e}")
+
+    if not clips:
+        logger.error("combine_audio_files: No valid audio clips could be loaded.")
+        return {"combined_audio_path": "ERROR: No valid clips"}
+
+    try:
+        # Ensure all clips are closed after concatenation, even if it fails during the process.
+        # MoviePy's concatenate_audioclips might not close source clips if it errors out mid-way.
+        final_clip = concatenate_audioclips(clips) 
+    except Exception as e:
+        logger.error(f"Error during concatenate_audioclips: {e}")
+        for clip_obj in clips: 
+            try: 
+                clip_obj.close() 
+            except Exception as close_exc:
+                logger.debug(f"Error closing clip during error handling: {close_exc}")
+        return {"combined_audio_path": f"ERROR: Concatenation failed - {e}"}
+
+    output_dir = Path("output/audio/")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the filename from input if provided, otherwise generate one.
+    if output_filename_from_input and isinstance(output_filename_from_input, str):
+        # Basic sanitization for filename (optional, depending on how robust it needs to be)
+        # For now, assume it's a simple filename like 'episode.mp3'
+        output_filename = Path(output_filename_from_input).name # Use only the filename part
+        if not output_filename.endswith(".mp3"):
+            output_filename += ".mp3" # Ensure .mp3 extension
+    else:
+        output_filename = f"combined_{uuid.uuid4().hex}.mp3"
+        logger.warning(f"'final_filename' not provided or invalid in inputs. Using generated name: {output_filename}")
+
+    output_path = output_dir / output_filename
+
+    try:
+        final_clip.write_audiofile(str(output_path), codec="mp3")
+        logger.info(f"Successfully combined audio to: {output_path.resolve()}")
+        return {
+            "combined_audio_path": str(output_path.resolve()),
+            "original_segments_count": len(valid_clips),
+            "total_duration_seconds": final_clip.duration,
+        }
+    except Exception as e:
+        logger.error(f"Error writing final audio file {output_path}: {e}")
+        return {"combined_audio_path": f"ERROR: Failed to write output audio - {e}"}
+    finally:
+        final_clip.close() # Close the final concatenated clip
+        for clip_obj in clips: # Ensure all source clips are closed
+            try:
+                clip_obj.close()
+            except Exception as close_exc:
+                logger.debug(f"Error closing source clip: {close_exc}")
+
+
+async def append_suffix_to_string(inputs: Dict[str, Any]) -> Dict[str, str]:
+    """Appends '_processed' to the input string."""
+    text_input = inputs.get("text_input")
+    if not isinstance(text_input, str):
+        raise TypeError(f"Input must be a string, got {type(text_input)}")
+    processed_text = f"{text_input}_processed"
+    logger.info(f"Appended suffix: '{text_input}' -> '{processed_text}'")
+    return {"processed_string": processed_text}
+
+
+async def concatenate_string_list(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Concatenates strings from a list of dictionaries.
+    Expects 'string_list' in inputs: a list of dictionaries,
+    where each dictionary has a 'processed_string' key.
+    Example input: {"string_list": [{"processed_string": "one"}, {"processed_string": "two"}]}
+    Output: {"concatenated_string": "one two"}
+    """
+    input_list_of_dicts = inputs.get("string_list")
+    logger.info(f"[Custom Task] concatenate_string_list called with: {input_list_of_dicts}")
+
+    if not isinstance(input_list_of_dicts, list):
+        msg = f"Input 'string_list' must be a list, got {type(input_list_of_dicts)}."
+        logger.error(msg)
+        # Raise an error or return an error structure, consistent with other tasks
+        return {"error": msg, "concatenated_string": ""}
+
+    strings_to_join = []
+    for item_dict in input_list_of_dicts:
+        if isinstance(item_dict, dict):
+            processed_string = item_dict.get("processed_string") # Key from map node's sub-task output
+            if isinstance(processed_string, str):
+                strings_to_join.append(processed_string)
+            else:
+                logger.warning(f"Item in string_list does not contain a 'processed_string' string: {item_dict}")
+        else:
+            logger.warning(f"Item in string_list is not a dictionary: {item_dict}")
+
+    result = " ".join(strings_to_join)
+    logger.info(f"Concatenated string: {result}")
+    return {"concatenated_string": result}
+
+
+async def extract_file_content(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extracts content from a file using the content_core library.
+    Expects 'file_path' in inputs: either a file path string or a Streamlit UploadedFile object.
+    Optional 'output_format' (default: "markdown") and 'engine' (default: "legacy").
+    Output: {"title": "...", "content": "extracted content"}
+    """
+    file_input = inputs.get("file_path")
+    output_format = inputs.get("output_format", "markdown")
+    engine = inputs.get("engine", "legacy")
+    
+    logger.info(f"[Custom Task] extract_file_content called with file: {file_input}")
+    
+    if not file_input:
+        return {"error": "No file_path provided for extract_file_content"}
+    
+    # Handle Streamlit UploadedFile objects
+    # Check for UploadedFile by checking for specific attributes
+    if hasattr(file_input, 'read') and hasattr(file_input, 'name') and hasattr(file_input, 'file_id'):
+        # This is a Streamlit UploadedFile object
+        try:
+            # Create a temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_input.name}") as temp_file:
+                temp_file.write(file_input.read())
+                temp_file_path = temp_file.name
+            
+            logger.info(f"Saved uploaded file to temporary path: {temp_file_path}")
+            actual_file_path = temp_file_path
+            
+        except Exception as e:
+            logger.error(f"Error saving uploaded file to temporary location: {e}")
+            return {"error": f"Failed to save uploaded file: {str(e)}"}
+    else:
+        # Assume it's already a file path string
+        actual_file_path = str(file_input)
+    
+    try:
+        # Use content_core to extract content
+        result = await extract_content({
+            "file_path": actual_file_path,
+            "output_format": output_format,
+            "engine": engine
+        })
+        
+        logger.info(f"Successfully extracted content from {actual_file_path}")
+        
+        # Clean up temporary file if we created one
+        if hasattr(file_input, 'read') and hasattr(file_input, 'name') and hasattr(file_input, 'file_id'):
+            try:
+                os.unlink(actual_file_path)
+                logger.debug(f"Cleaned up temporary file: {actual_file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up temporary file {actual_file_path}: {cleanup_error}")
+        
+        return {
+            "title": result.title,
+            "content": result.content
+        }
+        
+    except Exception as e:
+        logger.error(f"Error extracting content from {actual_file_path}: {e}")
+        
+        # Clean up temporary file on error if we created one
+        if hasattr(file_input, 'read') and hasattr(file_input, 'name') and hasattr(file_input, 'file_id'):
+            try:
+                os.unlink(actual_file_path)
+                logger.debug(f"Cleaned up temporary file after error: {actual_file_path}")
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to clean up temporary file {actual_file_path} after error: {cleanup_error}")
+        
+        return {"error": f"Failed to extract content: {str(e)}"}
+
+
+async def prepare_agent_configs(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prepares agent configurations for Mix of Agents functionality.
+    Creates multiple agent personas with different models and expertise areas.
+    """
+    question = inputs.get("question", "")
+    analysis_focus = inputs.get("analysis_focus", "General")
+    
+    logger.info(f"[Custom Task] prepare_agent_configs called for question: {question[:50]}...")
+    
+    if not question:
+        return {"error": "No question provided for agent preparation"}
+    
+    # Define different agent personas with their models and expertise
+    agent_definitions = [
+        {
+            "agent_name": "Technical Analyst",
+            "model_provider": "openai",
+            "model_name": "gpt-4o-mini",
+            "agent_expertise": "technical implementation and system architecture",
+            "agent_focus_areas": "- Technical feasibility and implementation details\n- System architecture considerations\n- Performance and scalability aspects\n- Integration challenges and solutions"
+        },
+        {
+            "agent_name": "Strategic Advisor", 
+            "model_provider": "anthropic",
+            "model_name": "claude-3-5-sonnet-20241022",
+            "agent_expertise": "business strategy and market analysis",
+            "agent_focus_areas": "- Business impact and strategic implications\n- Market opportunities and competitive landscape\n- ROI and cost-benefit analysis\n- Stakeholder considerations"
+        },
+        {
+            "agent_name": "Innovation Researcher",
+            "model_provider": "openrouter", 
+            "model_name": "x-ai/grok-3-beta",
+            "agent_expertise": "cutting-edge research and emerging trends",
+            "agent_focus_areas": "- Latest research and emerging trends\n- Future possibilities and innovations\n- Experimental approaches and novel solutions\n- Cross-industry insights and applications"
+        }
+    ]
+    
+    # Create configuration for each agent
+    agent_configs = []
+    for agent_def in agent_definitions:
+        config = {
+            "question": question,
+            "analysis_focus": analysis_focus,
+            "agent_name": agent_def["agent_name"],
+            "agent_expertise": agent_def["agent_expertise"], 
+            "agent_focus_areas": agent_def["agent_focus_areas"],
+            "model_override": {
+                "provider": agent_def["model_provider"],
+                "model": agent_def["model_name"]
+            }
+        }
+        agent_configs.append(config)
+    
+    logger.info(f"Prepared {len(agent_configs)} agent configurations")
+    return {"agent_configs": agent_configs}
+
+
+async def prepare_simple_agent_configs(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prepares simple agent configurations for testing Mix of Agents functionality.
+    Creates 2-3 simple agent personas for basic testing.
+    """
+    question = inputs.get("question", "")
+    
+    logger.info(f"[Custom Task] prepare_simple_agent_configs called for question: {question[:50]}...")
+    
+    if not question:
+        return {"error": "No question provided for agent preparation"}
+    
+    # Define simple agent personas for testing
+    agent_configs = [
+        {
+            "question": question,
+            "agent_name": "Technical Expert",
+            "agent_focus": "technical aspects and implementation details"
+        },
+        {
+            "question": question,
+            "agent_name": "Business Analyst", 
+            "agent_focus": "business impact and commercial considerations"
+        },
+        {
+            "question": question,
+            "agent_name": "General Advisor",
+            "agent_focus": "overall perspective and balanced view"
+        }
+    ]
+    
+    logger.info(f"Prepared {len(agent_configs)} simple agent configurations")
+    return {"agent_configs": agent_configs}
+
+
+async def prepare_summaries_for_synthesis(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Prepares individual file summaries for AI synthesis.
+    Expects 'summaries_list' in inputs: a list of summary results from map operation.
+    Output: {"formatted_summaries": "...", "file_count": N, "file_names": [...]}
+    """
+    summaries_list = inputs.get("summaries_list", [])
+    logger.info(f"[Custom Task] prepare_summaries_for_synthesis called with {len(summaries_list)} summaries")
+    
+    if not summaries_list:
+        return {"error": "No summaries provided to prepare"}
+    
+    formatted_parts = []
+    file_names = []
+    file_count = 0
+    
+    # Extract individual summaries and format them for AI processing
+    for item in summaries_list:
+        if isinstance(item, dict):
+            # Handle both direct summary strings and nested summary objects
+            if "summarize_content" in item and "extract_content" in item:
+                summary_text = item["summarize_content"]
+                title = item["extract_content"].get("title", f"Document {file_count + 1}")
+            elif "summary" in item:
+                summary_text = item["summary"]
+                title = item.get("title", f"Document {file_count + 1}")
+            else:
+                # Fallback: use the whole item as summary
+                summary_text = str(item)
+                title = f"Document {file_count + 1}"
+            
+            file_names.append(title)
+            formatted_parts.append(f"**Document {file_count + 1}: {title}**\n{summary_text}\n")
+            file_count += 1
+        else:
+            logger.warning(f"Unexpected item type in summaries_list: {type(item)}")
+    
+    if not formatted_parts:
+        return {"error": "No valid summaries found to prepare"}
+    
+    # Join all summaries with clear separators
+    formatted_summaries = "\n---\n\n".join(formatted_parts)
+    
+    logger.info(f"Successfully prepared {file_count} summaries for synthesis")
+    return {
+        "formatted_summaries": formatted_summaries,
+        "file_count": file_count,
+        "file_names": file_names
+    }
+
+
+# Registry of custom functions
+# The key is the identifier used in the recipe's 'function_identifier' field.
+FUNCTION_REGISTRY: Dict[str, CustomTaskFunction] = {
+    "research_news": research_news_stub,
+    "perplexity_search": perplexity_search_task,
+    "split_transcript": split_transcript,
+    "combine_audio_files": combine_audio_files,
+    "append_suffix_to_string": append_suffix_to_string,
+    "concatenate_string_list": concatenate_string_list,
+    "extract_file_content": extract_file_content,
+    "prepare_agent_configs": prepare_agent_configs,
+    "prepare_simple_agent_configs": prepare_simple_agent_configs,
+    "prepare_summaries_for_synthesis": prepare_summaries_for_synthesis,
+    # Add other custom functions here as they are developed
+    # e.g., "analyze_sentiment": analyze_sentiment_function,
+}
+
+
+def get_custom_function(identifier: str) -> CustomTaskFunction | None:
+    """Retrieves a custom function from the registry."""
+    return FUNCTION_REGISTRY.get(identifier)

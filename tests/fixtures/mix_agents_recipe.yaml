@@ -1,0 +1,44 @@
+# Test recipe for Mix of Agents functionality
+models:
+  gpt4_mini: &gpt4_mini
+    provider: openai
+    model: gpt-4o-mini
+
+recipe:
+  name: Test Mix of Agents
+  user_inputs:
+    - id: question
+      label: "Question"
+      type: string
+      default: "What is AI?"
+  
+  nodes:
+    - id: prepare_agents
+      type: function_task
+      function_identifier: "prepare_simple_agent_configs"
+      input:
+        question: question
+      output: agent_configs
+      
+    - id: multi_agent_analysis
+      type: map
+      over: agent_configs
+      task:
+        type: language_task
+        model: *gpt4_mini
+        prompt: "You are {{agent_name}}. Question: {{question}}. Focus: {{agent_focus}}."
+        input:
+          question: "{{item.question}}"
+          agent_name: "{{item.agent_name}}"
+          agent_focus: "{{item.agent_focus}}"
+        output: agent_response
+      output: agent_responses
+      on_error: skip
+      
+  edges:
+    - "START to prepare_agents"
+    - "prepare_agents to multi_agent_analysis"
+    - "multi_agent_analysis to END"
+      
+  final_outputs:
+    - agent_responses

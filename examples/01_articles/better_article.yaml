@@ -1,0 +1,39 @@
+imports:
+  - "common.yaml"
+
+# Recipe-specific definitions
+definitions:
+  expand_article_prompt: |
+    Take the following draft article and expand it significantly. Add more details, examples, and flesh out the sections. 
+    
+    Draft Article:
+    {{draft_article}}
+
+recipe:
+  name: Better Article Generation with Expansion
+  user_inputs:
+    - id: topic
+      label: "The main topic of the article"
+      type: text
+      description: "The main topic of the article"
+  nodes:
+    - id: generate_initial_article
+      type: recipe
+      description: "Generate initial article using the article.yaml recipe"
+      recipe_path: "article.json"
+      input_mapping:
+        topic: topic
+      output_mapping:
+        draft_article: generate_article
+      output: draft_article
+    - id: expand_article
+      type: language_task
+      model: "@reviewer"
+      prompt: "@expand_article_prompt"
+      input:
+        draft_article: draft_article
+      output: final_article
+  edges:
+    - "generate_initial_article to expand_article"
+  final_outputs:
+    - final_article

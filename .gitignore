@@ -11,3 +11,10 @@ wheels/
 
 .vscode
 .env
+
+output/
+.quarentena/
+claude-sessions/
+claude-plans/
+notebooks/
+prds/

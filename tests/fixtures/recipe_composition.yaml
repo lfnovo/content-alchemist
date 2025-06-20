@@ -1,0 +1,39 @@
+# Test recipe for recipe composition functionality
+models:
+  test_model: &test_model
+    provider: openai
+    model: gpt-4o-mini
+
+recipe:
+  name: Test Recipe Composition
+  user_inputs:
+    - id: topic
+      label: "Topic"
+      type: string
+      default: "Test Topic"
+  
+  nodes:
+    - id: use_simple_recipe
+      type: recipe
+      recipe_path: "tests/fixtures/simple_recipe.yaml"
+      input_mapping:
+        topic: topic
+      output_mapping:
+        draft_content: generate_content
+      output: draft_result
+      
+    - id: enhance_content
+      type: language_task
+      model: *test_model
+      prompt: "Enhance this content: {{draft_result}}"
+      input:
+        draft_result: draft_result
+      output: final_content
+      
+  edges:
+    - "START to use_simple_recipe"
+    - "use_simple_recipe to enhance_content"
+    - "enhance_content to END"
+      
+  final_outputs:
+    - final_content

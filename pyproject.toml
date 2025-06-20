@@ -1,15 +1,26 @@
 [project]
-name = "composer"
-version = "0.1.0"
-description = "Add your description here"
+name = "content-composer"
+version = "0.0.1"
+description = "Content Composer is a tool for creating extremely powerful content pipelines using AI."
 readme = "README.md"
 requires-python = ">=3.10.6"
 dependencies = [
-    "content-core[docling]>=0.5.0",
+    "ai-prompter>=0.1.0",
+    "content-core>=1.1.2",
+    "elevenlabs>=2.4.0",
+    "esperanto>=2.1.1",
+    "langchain-openai>=0.3.24",
+    "langgraph>=0.4.8",
+    "langgraph-supervisor>=0.0.27",
+    "loguru>=0.7.3",
+    "moviepy>=2.1.2",
+    "nest-asyncio>=1.6.0",
     "pip>=25.0.1",
     "python-dotenv>=1.1.0",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.3",
     "streamlit>=1.44.1",
-    "watchdog>=6.0.0",
+    "types-requests>=2.32.0.20250328",
 ]
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -19,10 +30,10 @@ requires = ["hatchling", "pip"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/fusion"]
+packages = ["src/content_composer"]
 
 [tool.setuptools]
-package-dir = {"fusion" = "src/fusion"}
+package-dir = {"content_composer" = "src/content_composer"}
 
 [dependency-groups]
 dev = [
@@ -31,9 +42,14 @@ dev = [
     "pyperclip>=1.9.0",
     "pytest>=7.2.0",
     "pytest-asyncio>=0.21.0",
+    "watchdog>=6.0.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

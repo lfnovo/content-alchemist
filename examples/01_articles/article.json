@@ -1,0 +1,21 @@
+{
+  "recipe": {
+    "name": "Simple Article Generation",
+    "user_inputs": [
+      {
+        "id": "topic",
+        "label": "Topic of the article",
+        "type": "string",
+        "default": "The future of AI and its impact on society"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "generate_article",
+        "type": "language_task",
+        "model": {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0.7},
+        "prompt": "Write a well-structured article about {{topic}}. Make it engaging and informative."
+      }
+    ]
+  }
+}
