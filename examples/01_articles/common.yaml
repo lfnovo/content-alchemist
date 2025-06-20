@@ -1,0 +1,14 @@
+# Common model configurations for Content Composer recipes
+# These models are shared across all recipes that import this file
+
+# OpenAI Models
+writer:
+  provider: openai
+  model: gpt-4o-mini
+  temperature: 0.7
+
+reviewer:
+  provider: openrouter
+  model: x-ai/grok-3-beta
+  temperature: 0.7
+

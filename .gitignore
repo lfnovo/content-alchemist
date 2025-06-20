@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+.vscode
+.env
+
+output/
+.quarentena/
+claude-sessions/
+claude-plans/
+notebooks/
+prds/
+recipes/
+definitions/

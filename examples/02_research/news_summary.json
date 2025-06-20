@@ -1,0 +1,74 @@
+{
+  "imports": [
+    "definitions/common.yaml"
+  ],
+  "definitions": {
+    "summarizer_model": {
+      "provider": "openai",
+      "model": "gpt-4o-mini",
+      "temperature": 0.7,
+      "max_tokens": 1500
+    },
+    "news_summary_prompt": "You are an expert news analyst.\nBased on the following research data, please provide a concise summary of the latest news about {{main_topic}}.\nFocus on the most significant developments and their potential impact.\n\nResearch Data:\n```json\n{{fetch_ai_news.content}} \n```\n\n{% if summary_instructions %}\nPlease follow this instructions:\n{{summary_instructions}}\n{% endif %}\n\nNews Summary:"
+  },
+  "recipe": {
+    "name": "AI News Summary via Perplexity",
+    "version": 1.0,
+    "user_inputs": [
+      {
+        "id": "main_topic",
+        "label": "Main Topic for Context (e.g., Generative AI)",
+        "type": "string"
+      },
+      {
+        "id": "research_instructions",
+        "label": "Instructions for the research",
+        "type": "text"
+      },
+      {
+        "id": "summary_instructions",
+        "label": "Instructions for the summary",
+        "type": "text"
+      },
+      {
+        "id": "recency",
+        "label": "Recency",
+        "type": "literal",
+        "literal_values": ["day", "week", "month", "year", "any"],
+        "default": "week"
+      },
+      {
+        "id": "mode",
+        "label": "Mode of the news",
+        "type": "literal",
+        "literal_values": ["fast", "deep"],
+        "default": "fast"
+      }
+    ],
+    "nodes": [
+      {
+        "id": "fetch_ai_news",
+        "type": "function_task",
+        "function_identifier": "perplexity_search",
+        "input": {
+          "search_query": "Please look for the latest news about {{main_topic}} - {{research_instructions}}",
+          "recency": "{{recency}}",
+          "mode": "{{mode}}"
+        }
+      },
+      {
+        "id": "summarize_news",
+        "type": "language_task",
+        "model": "@summarizer_model",
+        "prompt": "@news_summary_prompt"
+      }
+    ],
+    "edges": [
+      "fetch_ai_news to summarize_news"
+    ],
+    "final_outputs": [
+      "summarize_news",
+      "fetch_ai_news.citations"
+    ]
+  }
+}

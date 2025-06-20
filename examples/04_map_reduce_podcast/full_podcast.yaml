@@ -1,0 +1,101 @@
+recipe:
+  name: Podcast Generation Test
+  user_inputs:
+    - id: briefing
+      label: Briefing
+      type: text
+      description: "The briefing for the podcast"
+      default: "Let's talk about ..."
+      required: true
+    - id: output_filename
+      label: Output Filename for Podcast
+      type: string
+      description: Desired filename for the final combined podcast audio (e.g., podcast_episode.mp3).
+      default: "podcast_test_output.mp3"
+      required: true
+    - id: default_voice_id
+      label: "Voice ID for Speaker A / Fallback Default"
+      type: string
+      description: "Voice ID for Speaker A, and fallback for any unmapped speakers."
+      default: "wbZYPUM3zIb4exd1P7a0"
+      required: true
+    - id: speaker_b_voice_id
+      label: "Voice ID for Speaker B"
+      type: string
+      description: "Enter the voice ID to use for Speaker B."
+      default: "CwhRBWXzGAHq8TQ4Fs17" 
+      required: true
+
+  nodes:
+    - id: generate_transcript
+      type: language_task 
+      input:
+        briefing: briefing
+      model:
+        provider: openrouter # or your preferred provider
+        model: x-ai/grok-3-beta
+        temperature: 0.7
+        max_tokens: 5000
+      prompt: |
+        You are an AI assisted specialized in creating podcast transcripts.
+        The user has provided you with a briefing on what the episode needs to look like.
+        You will create a transcript based on the briefing.
+        The transcript will be used to generate the podcast audio.
+        The podcast will have at least 10 turns of messages between the speakers.
+
+        Briefing:
+        {{ briefing }} 
+
+        Format Instructions: 
+        The transcript should be in the following format:
+        ```
+        Speaker A: some text
+        Speaker B: some text
+        ``` 
+        Always alternating between speakers.
+        You MUST use Speaker A and Speaker B. Do not replace this with names or anything else.
+
+        Example Transcript:
+        ```
+        Speaker A: This is the first line for speaker A.
+        Speaker A: Another line for speaker A.
+        Speaker B: Speaker B now talking.
+        Speaker A: Speaker A back again for a short bit.
+        Speaker C: And a new speaker, C, chimes in.
+        ``` 
+      output: "full_transcript"
+    - id: perform_text_split 
+      type: function_task 
+      input:
+        transcript: "{{ full_transcript }}"
+        voice_mapping: "{{ {'Speaker A': default_voice_id, 'Speaker B': speaker_b_voice_id} }}" # Construct mapping
+        default_voice_id: "{{ default_voice_id }}"  # Fallback for Speaker C or others
+      function_identifier: split_transcript 
+      output: "transcription_phrases_result" 
+    - id: generate_audio_for_phrases 
+      type: map 
+      input: 
+        default_voice_id: "{{ default_voice_id }}" # This MAP node input is now effectively unused by the sub-task directly
+      over: "transcription_phrases_result.phrases" # This is a direct key path, not Jinja
+      task: 
+        type: text_to_speech_task 
+        model: 
+          provider: elevenlabs 
+          model: eleven_multilingual_v2 
+        input:
+          text: "text"                # References 'text' key from each item in 'over' list
+          voice: "voice_id"          # Task's 'voice' param comes from item's 'voice_id' key
+        output: "individual_audio_path" 
+      output: "all_individual_audio_segment_data" 
+    - id: combine_podcast_audio 
+      type: reduce 
+      input:
+        audio_segments_data: "{{ all_individual_audio_segment_data }}"
+        final_filename: "{{ output_filename }}"
+      function_identifier: combine_audio_files 
+      output: "final_podcast_details" 
+
+  edges:
+    - "generate_transcript to perform_text_split"
+    - "perform_text_split to generate_audio_for_phrases"
+    - "generate_audio_for_phrases to combine_podcast_audio"
